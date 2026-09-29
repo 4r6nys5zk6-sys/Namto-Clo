@@ -862,6 +862,31 @@ void energiesFinalBOfficial(const std::vector<float>&target,const std::vector<fl
         v=target[i+2];et+=v*v;v=model[i+2];em+=v*v;
         v=target[i+3];et+=v*v;v=model[i+3];em+=v*v;
     }
+
+// RMS helpers used for level matching (improves gain consistency vs NAM).
+inline float rmsF(const std::vector<float>& x) {
+    if (x.empty()) return 0.0f;
+    double acc = 0.0;
+    for (float v : x) acc += static_cast<double>(v) * static_cast<double>(v);
+    return preciseSqrtF(static_cast<float>(acc / static_cast<double>(x.size())));
+}
+
+// Scale a signal (or FIR taps) so that its RMS matches a target RMS.
+// Returns the linear gain that was applied.
+float normalizeRmsTo(std::vector<float>& x, float targetRms) {
+    const float cur = rmsF(x);
+    if (cur < 1.0e-30f || targetRms < 0.0f) return 1.0f;
+    const float g = targetRms / cur;
+    for (auto& v : x) v *= g;
+    return g;
+}
+
+// Match the RMS of `model` to the RMS of `target` (both same length preferred).
+// Returns the linear gain applied to model.
+float matchRms(std::vector<float>& model, const std::vector<float>& target) {
+    return normalizeRmsTo(model, rmsF(target));
+}
+
     for(;i<n;++i){float v=target[i];et+=v*v;v=model[i];em+=v*v;}
 }
 std::vector<double> fftFrequencyGrid(double sr){std::vector<double>f(kBins);for(std::size_t k=0;k<kBins;++k)f[k]=static_cast<double>(k)*(sr*0.5)/static_cast<double>(kBins-1);return f;}
@@ -1336,6 +1361,31 @@ float lossFromRatioF(const std::vector<float>&r,double sr){
 
 double lossFromRatio(const std::vector<double>&r,double sr){std::vector<float>x(r.begin(),r.end());return static_cast<double>(lossFromRatioF(x,sr));}
 
+// Frequency-weighted magnitude loss. Emphasizes the musically important
+// 90 Hz – 6 kHz region so the optimizer spends more effort where the ear is
+// most sensitive. Combined with the original Mel loss this reduces the
+// "thin / harsh / quiet" character that pure ratio loss often produces.
+float lossFromRatioWeightedF(const std::vector<float>& r, double sr) {
+  if (r.empty()) return 0.0f;
+  const auto freq = fftFrequencyGridF(sr);
+  float acc = 0.0f;
+  float wsum = 0.0f;
+
+  for (std::size_t k = 0; k < r.size() && k < freq.size(); ++k) {
+    const float ratio = std::max(r[k], static_cast<float>(kEps));
+    const float db = 20.0f * preciseLog10F(ratio);
+    float w = 1.0f;
+
+    if (freq[k] >= 90.0f && freq[k] <= 6000.0f) w *= 1.6f;
+    if (freq[k] > 6000.0f) w *= 1.2f;
+
+    acc += w * std::fabs(db);
+    wsum += w;
+  }
+
+  return (wsum > 0.0f) ? (acc / wsum) : 0.0f;
+}
+
 void regularizeInitialCurveF(std::vector<float>&v,const std::vector<float>&reference){
     if(v.empty()||reference.empty())return;
     // 0x5585a5..0x5586xx: maxss reduction starts at +0.0f; the 0.001
@@ -1449,7 +1499,13 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
         std::vector<float>final;
         renderModel(candidate,phaseIn,final,true);
         const auto residual=ratioSpectrumF(final,phaseTarget,sr);
-        const float loss=lossFromRatioF(residual,sr);
+        // Combined loss: original Mel ratio + weighted critical-band loss.
+        // The 0.55/0.45 mix keeps the official behaviour dominant while
+        // giving the ear-sensitive region more influence. This reduces
+        // the typical "thin / harsh" residual of pure ratio optimisation.
+        const float lossBase = lossFromRatioF(residual, sr);
+        const float lossWeighted = lossFromRatioWeightedF(residual, sr);
+        const float loss = 0.55f * lossBase + 0.45f * lossWeighted;
 
         if(loss<bestLoss){
             // 0x18009caef..0x18009cb74 snapshots S0, FIR A/B, Astate and
@@ -1462,7 +1518,7 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
             m=candidate;
             state=trial;
             corr=nextCorr;
-        }else if(loss>1.2f*bestLoss){
+        }else if(loss>1.12f*bestLoss){
             // 0x18009cb7e..0x18009cc24: restore best S0/FIR A/FIR B/Astate/
             // Bfactor and halve the already-decayed step.
             m=bestM;
@@ -1485,7 +1541,7 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
 
 void fitAB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){
     report(status,L"Independent: initial low-level / conditioned-sweep factorization...");FactorState state=initialFactorState(m,input,target,sr);int globalIter=0;
-    const Phase phases[]={{23,28,3,L"sweep"},{6,21,2,L"low-level"},{30,50,5,L"multi-level"}};for(const auto&ph:phases)optimizePhase(m,state,input,target,sr,ph,globalIter,status);
+    const Phase phases[]={{23,28,4,L"sweep"},{6,21,3,L"low-level"},{30,50,8,L"multi-level"}};for(const auto&ph:phases)optimizePhase(m,state,input,target,sr,ph,globalIter,status);
 }
 
 std::vector<float> convolveTruncate(const std::vector<float>&a,const std::vector<float>&b,std::size_t n){std::vector<float>o(n,0.0f);for(std::size_t i=0;i<a.size();++i)for(std::size_t j=0;j<b.size()&&i+j<n;++j)o[i+j]+=a[i]*b[j];return o;}
@@ -1527,9 +1583,9 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
     // magnitude independently with 0x554f00 BEFORE computing their ratio.
     const auto ct=conditionMagnitudeF(freq,targetMag,posN);
     const auto cm=conditionMagnitudeF(freq,modelMag,posN);
-    std::vector<float>ratio(posN,1.0f);for(std::size_t k=0;k<posN;++k){const double num=static_cast<double>(ct.mag[k])*1000000.0;const double den=static_cast<double>(cm.mag[k])*1000000.0+kEps;ratio[k]=std::clamp(static_cast<float>(num/den),0.1f,10.0f);}
+    std::vector<float>ratio(posN,1.0f);for(std::size_t k=0;k<posN;++k){const double num=static_cast<double>(ct.mag[k])*1000000.0;const double den=static_cast<double>(cm.mag[k])*1000000.0+kEps;ratio[k]=std::clamp(static_cast<float>(num/den),0.2f,5.0f);}
     const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<int>(static_cast<double>(posN)*0.1)));
-    ratio=gaussianSmoothExactF(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.1f,10.0f);
+    ratio=gaussianSmoothExactF(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.2f,5.0f);
     const auto final=conditionMagnitudeF(freq,ratio,256);return final.mag;
 }
 
@@ -1559,6 +1615,24 @@ void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&tar
     if(ep>1.0e-30f){
         const float g=preciseSqrtF(et)/preciseSqrtF(ep);
         for(auto&v:m.B)v*=g;
+    }
+
+    // Extra global RMS calibration on a longer segment (30-70 s).
+    // The official energy norm only looks at the 20 s tail; this second
+    // pass reduces residual loudness mismatch on the full playing range
+    // and makes the CLO sit closer in level to the original NAM.
+    {
+        const std::size_t b2 = officialTimeIndex(sr, 30.0f);
+        const std::size_t e2 = officialTimeIndex(sr, 70.0f);
+        const auto longIn  = sliceSignal(input,  b2, e2);
+        const auto longTgt = sliceSignal(target, b2, e2);
+        std::vector<float> longPred;
+        renderModel(m, longIn, longPred, true);
+        const float gRms = matchRms(longPred, longTgt); // only to measure
+        // Apply the measured gain to B (same effect as scaling the output).
+        if (std::fabs(gRms - 1.0f) > 1.0e-4f && gRms > 0.25f && gRms < 4.0f) {
+            for (auto& v : m.B) v *= gRms;
+        }
     }
 }
 
