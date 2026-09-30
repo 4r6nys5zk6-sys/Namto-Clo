@@ -862,31 +862,6 @@ void energiesFinalBOfficial(const std::vector<float>&target,const std::vector<fl
         v=target[i+2];et+=v*v;v=model[i+2];em+=v*v;
         v=target[i+3];et+=v*v;v=model[i+3];em+=v*v;
     }
-
-// RMS helpers used for level matching (improves gain consistency vs NAM).
-inline float rmsF(const std::vector<float>& x) {
-    if (x.empty()) return 0.0f;
-    double acc = 0.0;
-    for (float v : x) acc += static_cast<double>(v) * static_cast<double>(v);
-    return preciseSqrtF(static_cast<float>(acc / static_cast<double>(x.size())));
-}
-
-// Scale a signal (or FIR taps) so that its RMS matches a target RMS.
-// Returns the linear gain that was applied.
-float normalizeRmsTo(std::vector<float>& x, float targetRms) {
-    const float cur = rmsF(x);
-    if (cur < 1.0e-30f || targetRms < 0.0f) return 1.0f;
-    const float g = targetRms / cur;
-    for (auto& v : x) v *= g;
-    return g;
-}
-
-// Match the RMS of `model` to the RMS of `target` (both same length preferred).
-// Returns the linear gain applied to model.
-float matchRms(std::vector<float>& model, const std::vector<float>& target) {
-    return normalizeRmsTo(model, rmsF(target));
-}
-
     for(;i<n;++i){float v=target[i];et+=v*v;v=model[i];em+=v*v;}
 }
 std::vector<double> fftFrequencyGrid(double sr){std::vector<double>f(kBins);for(std::size_t k=0;k<kBins;++k)f[k]=static_cast<double>(k)*(sr*0.5)/static_cast<double>(kBins-1);return f;}
@@ -1499,10 +1474,6 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
         std::vector<float>final;
         renderModel(candidate,phaseIn,final,true);
         const auto residual=ratioSpectrumF(final,phaseTarget,sr);
-        // Combined loss: original Mel ratio + weighted critical-band loss.
-        // The 0.55/0.45 mix keeps the official behaviour dominant while
-        // giving the ear-sensitive region more influence. This reduces
-        // the typical "thin / harsh" residual of pure ratio optimisation.
         const float lossBase = lossFromRatioF(residual, sr);
         const float lossWeighted = lossFromRatioWeightedF(residual, sr);
         const float loss = 0.55f * lossBase + 0.45f * lossWeighted;
@@ -1584,7 +1555,7 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
     const auto ct=conditionMagnitudeF(freq,targetMag,posN);
     const auto cm=conditionMagnitudeF(freq,modelMag,posN);
     std::vector<float>ratio(posN,1.0f);for(std::size_t k=0;k<posN;++k){const double num=static_cast<double>(ct.mag[k])*1000000.0;const double den=static_cast<double>(cm.mag[k])*1000000.0+kEps;ratio[k]=std::clamp(static_cast<float>(num/den),0.2f,5.0f);}
-    const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<int>(static_cast<double>(posN)*0.1)));
+    const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<int>(static_cast<float>(posN)*0.06f)));
     ratio=gaussianSmoothExactF(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.2f,5.0f);
     const auto final=conditionMagnitudeF(freq,ratio,256);return final.mag;
 }
@@ -1615,24 +1586,6 @@ void refineB(Model&m,const std::vector<float>&input,const std::vector<float>&tar
     if(ep>1.0e-30f){
         const float g=preciseSqrtF(et)/preciseSqrtF(ep);
         for(auto&v:m.B)v*=g;
-    }
-
-    // Extra global RMS calibration on a longer segment (30-70 s).
-    // The official energy norm only looks at the 20 s tail; this second
-    // pass reduces residual loudness mismatch on the full playing range
-    // and makes the CLO sit closer in level to the original NAM.
-    {
-        const std::size_t b2 = officialTimeIndex(sr, 30.0f);
-        const std::size_t e2 = officialTimeIndex(sr, 70.0f);
-        const auto longIn  = sliceSignal(input,  b2, e2);
-        const auto longTgt = sliceSignal(target, b2, e2);
-        std::vector<float> longPred;
-        renderModel(m, longIn, longPred, true);
-        const float gRms = matchRms(longPred, longTgt); // only to measure
-        // Apply the measured gain to B (same effect as scaling the output).
-        if (std::fabs(gRms - 1.0f) > 1.0e-4f && gRms > 0.25f && gRms < 4.0f) {
-            for (auto& v : m.B) v *= gRms;
-        }
     }
 }
 
