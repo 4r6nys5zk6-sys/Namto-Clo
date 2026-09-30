@@ -1,4 +1,4 @@
-include "native_converter.hpp"
+#include "native_converter.hpp"
 #include "common.hpp"
 #include "stimulus.hpp"
 
@@ -1336,32 +1336,23 @@ float lossFromRatioF(const std::vector<float>&r,double sr){
 
 double lossFromRatio(const std::vector<double>&r,double sr){std::vector<float>x(r.begin(),r.end());return static_cast<double>(lossFromRatioF(x,sr));}
 
-// Frequency-weighted magnitude loss. Emphasizes the musically important
-// 90 Hz – 6 kHz region so the optimizer spends more effort where the ear is
-// most sensitive. Combined with the original Mel loss this reduces the
-// "thin / harsh / quiet" character that pure ratio loss often produces.
+// Frequency-weighted magnitude loss. Emphasizes 120 Hz - 5 kHz (pedal zone).
 float lossFromRatioWeightedF(const std::vector<float>& r, double sr) {
   if (r.empty()) return 0.0f;
   const auto freq = fftFrequencyGridF(sr);
   float acc = 0.0f;
   float wsum = 0.0f;
-
   for (std::size_t k = 0; k < r.size() && k < freq.size(); ++k) {
     const float ratio = std::max(r[k], static_cast<float>(kEps));
     const float db = 20.0f * preciseLog10F(ratio);
     float w = 1.0f;
-
-    // Stronger emphasis on the zone where TS808 + OCD9 + clean amp live.
-    // Pedal drive concentrates most character between ~120 Hz and ~5 kHz.
     if (freq[k] >= 120.0f && freq[k] <= 5000.0f) w *= 2.0f;
     else if (freq[k] >= 80.0f && freq[k] < 120.0f) w *= 1.4f;
     else if (freq[k] > 5000.0f && freq[k] <= 8000.0f) w *= 1.3f;
-    else if (freq[k] > 8000.0f) w *= 0.85f;   // slightly de-emphasize extreme top
-
+    else if (freq[k] > 8000.0f) w *= 0.85f;
     acc += w * std::fabs(db);
     wsum += w;
   }
-
   return (wsum > 0.0f) ? (acc / wsum) : 0.0f;
 }
 
@@ -1559,7 +1550,7 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
     const auto ct=conditionMagnitudeF(freq,targetMag,posN);
     const auto cm=conditionMagnitudeF(freq,modelMag,posN);
     std::vector<float>ratio(posN,1.0f);for(std::size_t k=0;k<posN;++k){const double num=static_cast<double>(ct.mag[k])*1000000.0;const double den=static_cast<double>(cm.mag[k])*1000000.0+kEps;ratio[k]=std::clamp(static_cast<float>(num/den),0.25f,4.0f);}
-    const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<int>(static_cast<float>(posN)*0.06f)));
+    const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<int>(static_cast<double>(posN)*0.06)));
     ratio=gaussianSmoothExactF(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.25f,4.0f);
     const auto final=conditionMagnitudeF(freq,ratio,256);return final.mag;
 }
