@@ -1,4 +1,4 @@
-#include "native_converter.hpp"
+include "native_converter.hpp"
 #include "common.hpp"
 #include "stimulus.hpp"
 
@@ -1351,8 +1351,12 @@ float lossFromRatioWeightedF(const std::vector<float>& r, double sr) {
     const float db = 20.0f * preciseLog10F(ratio);
     float w = 1.0f;
 
-    if (freq[k] >= 90.0f && freq[k] <= 6000.0f) w *= 1.6f;
-    if (freq[k] > 6000.0f) w *= 1.2f;
+    // Stronger emphasis on the zone where TS808 + OCD9 + clean amp live.
+    // Pedal drive concentrates most character between ~120 Hz and ~5 kHz.
+    if (freq[k] >= 120.0f && freq[k] <= 5000.0f) w *= 2.0f;
+    else if (freq[k] >= 80.0f && freq[k] < 120.0f) w *= 1.4f;
+    else if (freq[k] > 5000.0f && freq[k] <= 8000.0f) w *= 1.3f;
+    else if (freq[k] > 8000.0f) w *= 0.85f;   // slightly de-emphasize extreme top
 
     acc += w * std::fabs(db);
     wsum += w;
@@ -1476,7 +1480,7 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
         const auto residual=ratioSpectrumF(final,phaseTarget,sr);
         const float lossBase = lossFromRatioF(residual, sr);
         const float lossWeighted = lossFromRatioWeightedF(residual, sr);
-        const float loss = 0.55f * lossBase + 0.45f * lossWeighted;
+        const float loss = 0.40f * lossBase + 0.60f * lossWeighted;
 
         if(loss<bestLoss){
             // 0x18009caef..0x18009cb74 snapshots S0, FIR A/B, Astate and
@@ -1489,7 +1493,7 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
             m=candidate;
             state=trial;
             corr=nextCorr;
-        }else if(loss>1.12f*bestLoss){
+        }else if(loss>1.08f*bestLoss){
             // 0x18009cb7e..0x18009cc24: restore best S0/FIR A/FIR B/Astate/
             // Bfactor and halve the already-decayed step.
             m=bestM;
@@ -1512,7 +1516,7 @@ void optimizePhase(Model&m,FactorState&state,const std::vector<float>&input,cons
 
 void fitAB(Model&m,const std::vector<float>&input,const std::vector<float>&target,double sr,const StatusCallback&status){
     report(status,L"Independent: initial low-level / conditioned-sweep factorization...");FactorState state=initialFactorState(m,input,target,sr);int globalIter=0;
-    const Phase phases[]={{23,28,4,L"sweep"},{6,21,3,L"low-level"},{30,50,8,L"multi-level"}};for(const auto&ph:phases)optimizePhase(m,state,input,target,sr,ph,globalIter,status);
+    const Phase phases[]={{23,28,5,L"sweep"},{6,21,4,L"low-level"},{30,50,10,L"multi-level"}};for(const auto&ph:phases)optimizePhase(m,state,input,target,sr,ph,globalIter,status);
 }
 
 std::vector<float> convolveTruncate(const std::vector<float>&a,const std::vector<float>&b,std::size_t n){std::vector<float>o(n,0.0f);for(std::size_t i=0;i<a.size();++i)for(std::size_t j=0;j<b.size()&&i+j<n;++j)o[i+j]+=a[i]*b[j];return o;}
@@ -1554,9 +1558,9 @@ std::vector<float> finalTailCorrection(const std::vector<float>&model,const std:
     // magnitude independently with 0x554f00 BEFORE computing their ratio.
     const auto ct=conditionMagnitudeF(freq,targetMag,posN);
     const auto cm=conditionMagnitudeF(freq,modelMag,posN);
-    std::vector<float>ratio(posN,1.0f);for(std::size_t k=0;k<posN;++k){const double num=static_cast<double>(ct.mag[k])*1000000.0;const double den=static_cast<double>(cm.mag[k])*1000000.0+kEps;ratio[k]=std::clamp(static_cast<float>(num/den),0.2f,5.0f);}
+    std::vector<float>ratio(posN,1.0f);for(std::size_t k=0;k<posN;++k){const double num=static_cast<double>(ct.mag[k])*1000000.0;const double den=static_cast<double>(cm.mag[k])*1000000.0+kEps;ratio[k]=std::clamp(static_cast<float>(num/den),0.25f,4.0f);}
     const std::size_t smoothN=std::max<std::size_t>(1,static_cast<std::size_t>(static_cast<int>(static_cast<float>(posN)*0.06f)));
-    ratio=gaussianSmoothExactF(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.2f,5.0f);
+    ratio=gaussianSmoothExactF(ratio,smoothN);for(auto&v:ratio)v=std::clamp(v,0.25f,4.0f);
     const auto final=conditionMagnitudeF(freq,ratio,256);return final.mag;
 }
 
